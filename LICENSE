@@ -29,7 +29,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ========================================================================
 
-Portions of Cryptographic-Commitments-on-Anonymisable-Data were originally 
+Portions of Cryptographic-Commitments-on-Anonymizable-Data were originally 
 derived from the curve25519-dalek implementation by Isis Agora Lovecruft and 
 Henry de Valence, found at:
 <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek>,
