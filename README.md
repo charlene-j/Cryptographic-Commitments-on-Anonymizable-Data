@@ -6,3 +6,8 @@ which is a tuple of seven algorithm: $\mathsf{Setup}$, $\mathsf{Commit}$, $\math
 To compile the code with the optimized features, use the `cargo build --release` command in the terminal.
 To run the code, use the `cargo run --release` command, the command enables the execution of the code which is located in the "main.rs" file, the program determines the runtime of each algorithm over a number of iterations. The number of iterations is defined by the 'iter' variable in the file and it can be configured. In addition, the size of the parameters $\ell_1$ and $\ell_2$ can be chosen by the user in the "main.rs" file.
 The "lib.rs" file contains a serie of tests that permit the verification of the correct functionality of our algorithms, theses tests can be run with the `cargo test` command in the terminal.
+
+<span style="color:blue">
+## Dependencies and versions
+
+</span>
