@@ -9,16 +9,24 @@ The "lib.rs" file contains a serie of tests that permit the verification of the 
 
 ## Dependencies and versions
 cargo version: 1.75.0
+
 rustc version: 1.75.0
 
 [dependencies]
+
 curve25519-dalek ="4.1.3"
+
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 rand = "0.8.5"
+
 log = "0.4.20"
+
 pretty_env_logger = "0.5.0"
+
 sha2 = "0.10.8"
+
 digest = "0.10.7"
+
 zeroize = "1.7.0"
 
 
