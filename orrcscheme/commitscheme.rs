@@ -4,9 +4,16 @@ use std::time::{ Instant, Duration };
 use curve25519_dalek::{ scalar::Scalar, RistrettoPoint, traits::Identity, constants::RISTRETTO_BASEPOINT_POINT, constants::RISTRETTO_BASEPOINT_TABLE };
 use zeroize::Zeroize; 
 use sha2::{ Sha512, Digest }; 
+use std::io;
+use std::io::{ IoSlice, Write };
+use std::fs::File;
+use std::fs;
+use std::io::Read;
+use curve25519_dalek::ristretto::CompressedRistretto;
+
 
 // Definition of the structure for the setup set:
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Set { 
 pub gen: RistrettoPoint, 
     pub g_: Vec<Vec<RistrettoPoint>>, 
@@ -17,7 +24,7 @@ pub gen: RistrettoPoint,
 }
  
 // Definition of the structure for the commitment:
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Commit { 
     pub pk: RistrettoPoint, 
     pub a1: Vec<RistrettoPoint>, 
@@ -27,20 +34,19 @@ pub struct Commit {
 }
 
 // Definition of the structure for the zero-knowledge proofs "pi_{A_1}" and "pi_{A_2}":
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ZeroKnowledgeProofA {
-    pub commitment: RistrettoPoint,
-    pub response: Scalar,
+    pub commitment0: Vec<RistrettoPoint>,
+    //pub response: Scalar,
     pub commitments: Vec<RistrettoPoint>,
     pub challenges: Vec<Scalar>,
     pub responses: Vec<Scalar>
 }
 
 // Definition of the structure for the zero-knowledge proofs "pi_B":
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ZeroKnowledgeProofB {
-    pub commitment: RistrettoPoint,
-    pub response: Scalar,
+    pub commitment0: Vec<RistrettoPoint>,
     pub commitments1: Vec<RistrettoPoint>,
     pub challenge1: Scalar,
     pub response1: Scalar,
@@ -50,7 +56,7 @@ pub struct ZeroKnowledgeProofB {
 }
 
 // Definition of the structure for the zero-knowledge proofs in the algorithm "Commit":
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ZeroKnowledgeProofCommit {
     pub proofa1: Vec<ZeroKnowledgeProofA>,
     pub proofa2: Vec<ZeroKnowledgeProofA>,
@@ -58,14 +64,14 @@ pub struct ZeroKnowledgeProofCommit {
 }
 
 // Definition of the structure for the zero-knowledge proofs in the algorithm "Open":
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ZeroKnowledgeProofOpen {
     pub commitments: Vec<RistrettoPoint>,
     pub response: Scalar
 }
 
 // Definition of the structure for the zero-knowledge proofs in the algorithm "OpenLDP":
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ZeroKnowledgeProofOpenLDP {
     pub commitments0: Vec<RistrettoPoint>,
     pub challenge0: Scalar,
@@ -135,6 +141,26 @@ fn convert_scalar(a: [u8; 32]) -> Scalar {
     return s
 }
 
+// Convert a usize to an array [u8; 32]:
+pub fn usize_to_u8_array(u: usize) -> [u8; 32] {
+    let mut array: [u8; 32] = [0u8; 32];
+    let bytes = u.to_le_bytes();
+
+    for i in 0..bytes.len() {
+        array[i] = bytes[i];
+    }
+    
+    return array;
+}
+
+// Convert an array [u8; 32] to a usize:
+pub fn u8_array_to_usize(array: [u8; 32]) -> usize {
+    let bytes = &array[0..8]; 
+    let u = usize::from_le_bytes(bytes.try_into().expect("REASON"));
+    
+    return u;
+}
+
 // Hash a vector of bytes:
 pub fn hash(digest: Vec<[u8;32]>) -> Scalar {
 
@@ -152,27 +178,26 @@ pub fn hash(digest: Vec<[u8;32]>) -> Scalar {
 
 // Proof for "pi_A".
 pub fn prove_pi_a<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: RistrettoPoint, g: Vec<RistrettoPoint>, y: Vec<RistrettoPoint>, sk: Scalar, trueinstance: usize) -> ZeroKnowledgeProofA {  
-    let mut random_0 = rand_scalar(rng);
-    let mut random = rand_scalar(rng);
-    
+    let mut random = rand_scalar(rng);  
+    let mut com_0: Vec<RistrettoPoint> = Vec::new();
     let mut vec_com: Vec<RistrettoPoint> = Vec::new();
     let mut vec_chal: Vec<Scalar> = Vec::new();
     let mut vec_resp: Vec<Scalar> = Vec::new();
 
-    // Commitment for the instance "pk = x * gen".     
-    let com_0 = random_0 * gen;       
-    
+    // Commitment for pk:             
     let mut i = 0;
-    while i < g.len() {
+    while i < 2 {
     	if i != trueinstance {
     	    vec_chal.push(rand_scalar(rng));
     	    vec_resp.push(rand_scalar(rng));
+    	    com_0.push(vec_resp[i] * gen - vec_chal[i] * pk);
     	    vec_com.push(vec_resp[i] * g[i] - vec_chal[i] * y[i]);
     	}
     	else {
     	     vec_chal.push(Scalar::from(0u32));
              vec_resp.push(Scalar::from(0u32));
-             vec_com.push(random * g[trueinstance]);
+             com_0.push(random * gen);
+             vec_com.push(random * g[trueinstance]);       
     	}
     	i = i+1;
     }
@@ -180,12 +205,17 @@ pub fn prove_pi_a<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
     // Challenge of the proof:
     let mut prehash: Vec<[u8; 32]> = Vec::new();
     prehash.push(*(gen.compress()).as_bytes());
-    for i in 0..g.len() {
+    for i in 0..2 {
         prehash.push(*(g[i].compress()).as_bytes());
     } 
     prehash.push(*(pk.compress()).as_bytes());
-    prehash.push(*(com_0.compress()).as_bytes());
-    for i in 0..vec_com.len() {  
+    for i in 0..2 {
+        prehash.push(*(y[i].compress()).as_bytes());
+    } 
+    for i in 0..2 {
+        prehash.push(*(com_0[i].compress()).as_bytes());
+    }
+    for i in 0..2 {  
     	prehash.push(*(vec_com[i].compress()).as_bytes());  
     }
     
@@ -198,20 +228,19 @@ pub fn prove_pi_a<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
     vec_resp[trueinstance] = random + sk * vec_chal[trueinstance];
     
     // Response for the instance "pk = x * gen".
-    let resp_0 = random_0 + sk * chal_0;
+    //let resp_0 = random_0 + sk * chal_0;
 
-    random_0.zeroize();
+    //random_0.zeroize();
     random.zeroize();
             
-    return ZeroKnowledgeProofA { commitment: com_0, response: resp_0, commitments: vec_com, challenges: vec_chal, responses: vec_resp };
+    return ZeroKnowledgeProofA{ commitment0: com_0, commitments: vec_com, challenges: vec_chal, responses: vec_resp };
 }
 
 // Verification of the Zero-Knowledge Proof "pi_A":
 pub fn verify_pi_a(gen: RistrettoPoint, pk: RistrettoPoint, g: Vec<RistrettoPoint>, y: Vec<RistrettoPoint>, proof_a: ZeroKnowledgeProofA) -> bool {
     
     //Parse proof_a:
-    let com_0 = proof_a.commitment;
-    let resp_0 = proof_a.response;
+    let com_0 = proof_a.commitment0;
     let vec_com = proof_a.commitments;
     let vec_chal = proof_a.challenges;
     let vec_resp = proof_a.responses;
@@ -219,21 +248,26 @@ pub fn verify_pi_a(gen: RistrettoPoint, pk: RistrettoPoint, g: Vec<RistrettoPoin
     // Challenge of the proof:
     let mut prehash: Vec<[u8; 32]> = Vec::new();
     prehash.push(*(gen.compress()).as_bytes());
-    for i in 0..g.len() {
+    for i in 0..2 {
         prehash.push(*(g[i].compress()).as_bytes());
     } 
     prehash.push(*(pk.compress()).as_bytes());
-    prehash.push(*(com_0.compress()).as_bytes());
-    for i in 0..vec_com.len() {  
+    for i in 0..2 {
+        prehash.push(*(y[i].compress()).as_bytes());
+    } 
+    for i in 0..2 {
+        prehash.push(*(com_0[i].compress()).as_bytes());
+    }
+    for i in 0..2 {  
     	prehash.push(*(vec_com[i].compress()).as_bytes());  
     }
     
     let chal_0 = hash(prehash);
 	
     // Test:
-    if chal_0 == sum_scalar((vec_chal).to_vec()) && resp_0 * gen == com_0 + chal_0 * pk {
-        for i in 0..vec_chal.len() {
-            if vec_resp[i] * g[i] != vec_com[i] + vec_chal[i] * y[i]{
+    if chal_0 == sum_scalar((vec_chal).to_vec()) && vec_resp[0] * gen == com_0[0] + vec_chal[0] * pk && vec_resp[1] * gen == com_0[1] + vec_chal[1] * pk{
+        for i in 0..2 {
+            if vec_resp[i] * g[i] != vec_com[i] + vec_chal[i] * y[i] {
                 return false;
             }
         } 
@@ -248,15 +282,15 @@ pub fn prove_pi_b<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
     
     if trueinstance == 1 { // The first part of instance is the verified instance.     
         // Commitment for the instance "pk = x * gen":
-        let mut random_0 = rand_scalar(rng);     
-        let com_0 = random_0 * gen;   
+        let mut com_0: Vec<RistrettoPoint> = Vec::new();   
         
         // Commitment for the verified instance:
         let mut random = rand_scalar(rng);
         let mut vec_com_1: Vec<RistrettoPoint> = Vec::new();
-        for i in 0..g1.len() {
-       	    vec_com_1.push(random * g1[i]); 
+        for i in 0..2 {
+       	    vec_com_1.push(random * g1[i]);
         }
+        com_0.push(random * gen);
           
         // Challenge for the unverified instance:
         let chal_2 = rand_scalar(rng); 
@@ -266,25 +300,35 @@ pub fn prove_pi_b<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
         
 	// Commitment for the unverified instance:
         let mut vec_com_2: Vec<RistrettoPoint> = Vec::new();
-        for i in 0..g2.len() {
-       	    vec_com_2.push(resp_2 * g2[i] - chal_2 * y2[i]); 
+        for i in 0..2 {
+       	    vec_com_2.push(resp_2 * g2[i] - chal_2 * y2[i]);
         }
+        // Simulation for the instance "pk = x * gen":
+        com_0.push(resp_2 * gen - chal_2 * pk);
 
         // Challenge of the proof:
         let mut prehash: Vec<[u8;32]> = Vec::new();
         prehash.push(*(gen.compress()).as_bytes());
-   	for i in 0..g1.len() {
+   	for i in 0..2 {
 	    prehash.push(*(g1[i].compress()).as_bytes());
         }
-        for i in 0..g2.len() {
+        for i in 0..2 {
 	    prehash.push(*(g2[i].compress()).as_bytes());
         }
         prehash.push(*(pk.compress()).as_bytes());
-        prehash.push(*(com_0.compress()).as_bytes());
-        for i in 0..vec_com_1.len() {
+        for i in 0..2 {
+	    prehash.push(*(y1[i].compress()).as_bytes());
+        }
+        for i in 0..2 {
+	    prehash.push(*(y2[i].compress()).as_bytes());
+        }
+        for i in 0..2 {
+            prehash.push(*(com_0[i].compress()).as_bytes());
+        }
+        for i in 0..2 {
             prehash.push(*(vec_com_1[i].compress()).as_bytes());
         }
-        for i in 0..vec_com_2.len() {
+        for i in 0..2 {
 	    prehash.push(*(vec_com_2[i].compress()).as_bytes());
         }
         let chal_0 = hash(prehash);
@@ -294,19 +338,13 @@ pub fn prove_pi_b<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
         
         // Response for the verified instance:
         let resp_1 = random + sk * chal_1;
-    
-        // Response for the instance "pk = x * gen":
-        let resp_0 = random_0 + sk * chal_0; 
         
         random.zeroize();
-        random_0.zeroize(); 
         
-        return ZeroKnowledgeProofB { commitment: com_0, response: resp_0, commitments1: vec_com_1, challenge1: chal_1, response1: resp_1, commitments2: vec_com_2, challenge2: chal_2, response2: resp_2 };
+        return ZeroKnowledgeProofB{ commitment0: com_0, commitments1: vec_com_1, challenge1: chal_1, response1: resp_1, commitments2: vec_com_2, challenge2: chal_2, response2: resp_2 };
     } 
-    else {
-        // Commitment for the instance "pk = x * gen": 
-        let mut random_0 = rand_scalar(rng);     
-        let com_0 = random_0 * gen;    
+    else { 
+        let mut com_0: Vec<RistrettoPoint> = Vec::new();   
        
         // Commitment for the verified instance:
         let mut random = rand_scalar(rng);  
@@ -323,25 +361,37 @@ pub fn prove_pi_b<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
         
         // Commitment for the unverified instance:
 	let mut vec_com_1: Vec<RistrettoPoint> = Vec::new();
-        for i in 0..g1.len() {
+        for i in 0..2 {
        	    vec_com_1.push(resp_1 * g1[i] - chal_1 * y1[i]); 
         }
+        // Simulation for the instance "pk = x * gen":  
+        com_0.push(resp_1 * gen - chal_1 * pk);
+        // Commitment for the instance "pk = x * gen":
+        com_0.push(random * gen);
 
         // Challenge of the proof:
         let mut prehash: Vec<[u8;32]> = Vec::new();
         prehash.push(*(gen.compress()).as_bytes());
-   	for i in 0..g1.len() {
+   	for i in 0..2 {
 	    prehash.push(*(g1[i].compress()).as_bytes());
         }
-        for i in 0..g2.len() {
+        for i in 0..2 {
 	    prehash.push(*(g2[i].compress()).as_bytes());
         }
         prehash.push(*(pk.compress()).as_bytes());
-        prehash.push(*(com_0.compress()).as_bytes());
-        for i in 0..vec_com_1.len() {
+        for i in 0..2 {
+	    prehash.push(*(y1[i].compress()).as_bytes());
+        }
+        for i in 0..2 {
+	    prehash.push(*(y2[i].compress()).as_bytes());
+        }
+        for i in 0..2 {
+            prehash.push(*(com_0[i].compress()).as_bytes());
+        }
+        for i in 0..2 {
             prehash.push(*(vec_com_1[i].compress()).as_bytes());
         }
-        for i in 0..vec_com_2.len() {
+        for i in 0..2 {
 	    prehash.push(*(vec_com_2[i].compress()).as_bytes());
         }
         let chal_0 = hash(prehash);
@@ -351,14 +401,10 @@ pub fn prove_pi_b<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
         
         // Response for the verified instance:
         let resp_2 = random + sk * chal_2;
-    
-        // Response for the instance "pk = x * gen".
-        let resp_0 = random_0 + sk * chal_0;
  		
  	random.zeroize();
-        random_0.zeroize();  
         
-        return ZeroKnowledgeProofB { commitment: com_0, response: resp_0, commitments1: vec_com_1, challenge1: chal_1, response1: resp_1, commitments2: vec_com_2, challenge2: chal_2, response2: resp_2 };
+        return ZeroKnowledgeProofB{ commitment0: com_0, commitments1: vec_com_1, challenge1: chal_1, response1: resp_1, commitments2: vec_com_2, challenge2: chal_2, response2: resp_2 };
     }     
 }
 
@@ -366,8 +412,7 @@ pub fn prove_pi_b<T: CryptoRng + RngCore>(rng: &mut T, gen: RistrettoPoint, pk: 
 pub fn verify_pi_b(gen: RistrettoPoint, pk: RistrettoPoint, g1: Vec<RistrettoPoint>, g2: Vec<RistrettoPoint>, y1: Vec<RistrettoPoint>, y2: Vec<RistrettoPoint>, proof_b: ZeroKnowledgeProofB) -> bool {
     
     //Parse proof_b:
-    let com_0 = proof_b.commitment;
-    let resp_0 = proof_b.response;
+    let com_0 = proof_b.commitment0;
     let vec_com_1 = proof_b.commitments1;
     let chal_1 = proof_b.challenge1;
     let resp_1 = proof_b.response1;
@@ -375,28 +420,36 @@ pub fn verify_pi_b(gen: RistrettoPoint, pk: RistrettoPoint, g1: Vec<RistrettoPoi
     let chal_2 = proof_b.challenge2;
     let resp_2 = proof_b.response2;
     
-    // Challenge of the proof:        
+    // Challenge of the proof:
     let mut prehash: Vec<[u8;32]> = Vec::new();
     prehash.push(*(gen.compress()).as_bytes());
-    for i in 0..g1.len() {
+    for i in 0..2 {
 	prehash.push(*(g1[i].compress()).as_bytes());
     }
-    for i in 0..g2.len() {
+    for i in 0..2 {
 	prehash.push(*(g2[i].compress()).as_bytes());
     }
     prehash.push(*(pk.compress()).as_bytes());
-    prehash.push(*(com_0.compress()).as_bytes());
-    for i in 0..vec_com_1.len() {
+    for i in 0..2 {
+	prehash.push(*(y1[i].compress()).as_bytes());
+    }
+    for i in 0..2 {
+	prehash.push(*(y2[i].compress()).as_bytes());
+    }
+    for i in 0..2 {
+        prehash.push(*(com_0[i].compress()).as_bytes());
+    }
+    for i in 0..2 {
         prehash.push(*(vec_com_1[i].compress()).as_bytes());
     }
-    for i in 0..vec_com_2.len() {
+    for i in 0..2 {
 	prehash.push(*(vec_com_2[i].compress()).as_bytes());
     }
     let chal_0 = hash(prehash);
    
     // Test:
-    if chal_0 == sum_scalar(vec![chal_1, chal_2]) && resp_0 * gen == com_0 + chal_0 * pk {
-        for i in 0..g1.len() {
+    if chal_0 == sum_scalar(vec![chal_1, chal_2]) && resp_1 * gen == com_0[0] + chal_1 * pk && resp_2 * gen == com_0[1] + chal_2 * pk {
+        for i in 0..2 {
             if resp_1 * g1[i] == vec_com_1[i] + chal_1 * y1[i] {
                 if  resp_2 * g2[i] != vec_com_2[i] + chal_2 * y2[i] {
                     return false;
@@ -616,7 +669,7 @@ pub fn setup<T: CryptoRng + RngCore>(rng: &mut T, l_1: usize, l_2: usize) -> Set
     let f = vec![f_0, f_1];
     let h = vec![h_0, h_1];
     let generator = RISTRETTO_BASEPOINT_POINT;
-    let set = Set { gen: generator, g_: g, f_: f, h_: h, l1: l_1, l2: l_2 };  
+    let set = Set{ gen: generator, g_: g, f_: f, h_: h, l1: l_1, l2: l_2 };  
     return set;   
 }
 
@@ -704,7 +757,7 @@ pub fn commit<T: CryptoRng + RngCore>(rng: &mut T, set: Set, m: Vec<usize>, thet
         let pi_b = prove_pi_b(rng, generator, y, vec![h[0][i], h[1][i]], vec![h[1][i], h[0][i]], vec![b_0[i], b_1[i]],vec![b_0[i], b_1[i]], x, trueinstance);
         proof_b.push(pi_b);        
     } 
-    let proof_comm = ZeroKnowledgeProofCommit { proofa1: proof_a_1, proofa2: proof_a_2, proofb: proof_b } ;
+    let proof_comm = ZeroKnowledgeProofCommit{ proofa1: proof_a_1, proofa2: proof_a_2, proofb: proof_b } ;
        
     return (x, c, proof_comm);
 }
@@ -733,21 +786,21 @@ pub fn ver_commit(set: Set, c: Commit, proof_comm: ZeroKnowledgeProofCommit) -> 
     let proof_b = proof_comm.proofb; 
     
     for i in 0..l_1 {
-        let p = ZeroKnowledgeProofA { commitment: proof_a_1[i].commitment, response: proof_a_1[i].response, commitments: (&proof_a_1[i].commitments).to_vec(), challenges: (&proof_a_1[i].challenges).to_vec(), responses: (&proof_a_1[i].responses).to_vec() };
+        let p = ZeroKnowledgeProofA{ commitment0: (&proof_a_1[i].commitment0).to_vec(), commitments: (&proof_a_1[i].commitments).to_vec(), challenges: (&proof_a_1[i].challenges).to_vec(), responses: (&proof_a_1[i].responses).to_vec() };
         if verify_pi_a(generator, y, vec![g[0][i], g[1][i]], vec![a_1[i], a_1[i]], p) == false {
             return false;
         }
     }
     
     for i in 0..l_2 {
-        let p = ZeroKnowledgeProofA { commitment: proof_a_2[i].commitment, response: proof_a_2[i].response, commitments: (&proof_a_2[i].commitments).to_vec(), challenges: (&proof_a_2[i].challenges).to_vec(), responses: (&proof_a_2[i].responses).to_vec() };
+        let p = ZeroKnowledgeProofA{ commitment0: (&proof_a_2[i].commitment0).to_vec(), commitments: (&proof_a_2[i].commitments).to_vec(), challenges: (&proof_a_2[i].challenges).to_vec(), responses: (&proof_a_2[i].responses).to_vec() };
         if verify_pi_a(generator, y, vec![f[0][i], f[1][i]], vec![a_2[i], a_2[i]], p) == false {
             return false;
         }
     }
     
-    for i in 0..l_2{
-        let p = ZeroKnowledgeProofB { commitment: proof_b[i].commitment, response: proof_b[i].response, commitments1: (&proof_b[i].commitments1).to_vec(), challenge1: proof_b[i].challenge1, response1: proof_b[i].response1, commitments2: (&proof_b[i].commitments2).to_vec(), challenge2: proof_b[i].challenge2, response2: proof_b[i].response2 };
+    for i in 0..l_2 {
+        let p = ZeroKnowledgeProofB{ commitment0: (&proof_b[i].commitment0).to_vec(), commitments1: (&proof_b[i].commitments1).to_vec(), challenge1: proof_b[i].challenge1, response1: proof_b[i].response1, commitments2: (&proof_b[i].commitments2).to_vec(), challenge2: proof_b[i].challenge2, response2: proof_b[i].response2 };
         if verify_pi_b(generator, y, vec![h[0][i], h[1][i]], vec![h[1][i], h[0][i]], vec![b_0[i], b_1[i]], vec![b_0[i], b_1[i]], p) == false {      
             return false;
         }
@@ -774,13 +827,13 @@ pub fn open<T: CryptoRng + RngCore>(rng: &mut T, set: Set, k: Scalar, c: Commit)
     let mut m: Vec<usize> = Vec::new();
     for i in 0..l_2 {
         if a_2[i] == x * f[0][i] {	
-	        m.push(0);
+	    m.push(0);
             alpha_2.push(f[0][i]);
-	    }
-	    if a_2[i] == x * f[1][i] {
-	        m.push(1);
-	        alpha_2.push(f[1][i]);
-	    }
+	}
+	if a_2[i] == x * f[1][i] {
+	    m.push(1);
+	    alpha_2.push(f[1][i]);
+	}
     }
     let prod_a_2 = sum_ristretto((&a_2).to_vec());
     let prod_alpha_2 = sum_ristretto((&alpha_2).to_vec());
@@ -991,7 +1044,7 @@ pub fn sign<T: CryptoRng + RngCore>(rng: &mut T, c: Commit, g: RistrettoPoint, p
     let r_ = rand * g;
 	
     // Challenge:
-    let mut prehash: Vec<[u8 ;32]> = Vec::new();
+    let mut prehash: Vec<[u8; 32]> = Vec::new();
     prehash.push(*(g.compress()).as_bytes());
     prehash.push(*(pubk.compress()).as_bytes());
     prehash.push(*(r_.compress()).as_bytes());
@@ -1026,7 +1079,7 @@ pub fn ver(c: Commit, g: RistrettoPoint, pubk: RistrettoPoint, s: Signature) -> 
     let z_ = s.z;
 	
     // Challenge:
-    let mut prehash: Vec<[u8 ;32]> = Vec::new();
+    let mut prehash: Vec<[u8; 32]> = Vec::new();
     prehash.push(*(g.compress()).as_bytes());
     prehash.push(*(pubk.compress()).as_bytes());
     prehash.push(*(r_.compress()).as_bytes());
@@ -1053,8 +1106,446 @@ pub fn ver(c: Commit, g: RistrettoPoint, pubk: RistrettoPoint, s: Signature) -> 
     return false;
 }
 
+// Write the setup in a file:
+fn writesetup(set: &Set) -> io::Result<()>{
+    let mut setup: Vec<[u8; 32]> = Vec::new();
+    let mut file = File::options().write(true).truncate(true).create(true).open("setup.txt")?;
+    match set{
+    	Set{ gen, g_, f_, h_, l1, l2 } => {
+    	    setup.push(((gen).compress()).to_bytes());
+    	    for i in 0..2 {
+    	        for j in 0..*l1 {
+    	            setup.push(((g_[i][j]).compress()).to_bytes()); 
+    	        }
+    	    }
+    	    for i in 0..2 {
+    	        for j in 0..*l2 {
+    	            setup.push(((f_[i][j]).compress()).to_bytes());
+    	        } 
+    	    }
+    	    for i in 0..2 {
+    	        for j in 0..*l2 {
+    	            setup.push(((h_[i][j]).compress()).to_bytes());
+    	        } 
+    	    }
+            setup.push(usize_to_u8_array(*l1));
+    	    setup.push(usize_to_u8_array(*l2));
+        },
+    }
+    for i in 0..setup.len(){
+        file.write_vectored(&[IoSlice::new(&setup[i])])?;
+    }
+    return Ok(())
+} 
+
+// Export the setup located in a file:
+fn exportsetup() -> Set{
+    let mut buffer = Vec::new();
+    let file = File::open("setup.txt"); 
+    let _= file.expect("REASON").read_to_end(&mut buffer); 
+    let mut setup: Vec<[u8; 32]> = Vec::new();
+    let mut array = [0u8; 32];
+    for i in 0..buffer.len() {
+    	array[i % 32] = buffer[i];
+    	if i % 32 == 31 && i > 0{
+    		setup.push(array.clone());
+    	}
+    }
+    let l = setup.len();
+    let l_1 = u8_array_to_usize(setup[l-2]);
+    let l_2 = u8_array_to_usize(setup[l-1]);
+    
+    let generator = CompressedRistretto(setup[0]).decompress().unwrap();
+    let mut gg: Vec<Vec<RistrettoPoint>> = Vec::new();
+    let mut ff: Vec<Vec<RistrettoPoint>> = Vec::new();
+    let mut hh: Vec<Vec<RistrettoPoint>> = Vec::new();
+    let mut compt = 1;
+    let mut g0: Vec<RistrettoPoint> = Vec::new();
+    for j in compt..compt + l_1 {
+    	g0.push(CompressedRistretto(setup[j]).decompress().unwrap()); 
+    }
+    compt = compt + l_1;
+    gg.push(g0);
+    let mut g1: Vec<RistrettoPoint> = Vec::new();
+    for j in compt..compt + l_1 {
+    	g1.push(CompressedRistretto(setup[j]).decompress().unwrap()); 
+    }
+    compt = compt + l_1;
+    gg.push(g1);
+    
+    let mut f0: Vec<RistrettoPoint> = Vec::new();
+    for j in compt..compt + l_2 {
+    	f0.push(CompressedRistretto(setup[j]).decompress().unwrap()); 
+    }
+    compt = compt + l_2;
+    ff.push(f0);
+    let mut f1: Vec<RistrettoPoint> = Vec::new();
+    for j in compt..compt + l_2 {
+    	f1.push(CompressedRistretto(setup[j]).decompress().unwrap()); 
+    }
+    compt = compt + l_2;
+    ff.push(f1);
+    
+    let mut h0: Vec<RistrettoPoint> = Vec::new();
+    for j in compt..compt + l_2 {
+    	h0.push(CompressedRistretto(setup[j]).decompress().unwrap()); 
+    }
+    compt = compt + l_2;
+    hh.push(h0);
+    let mut h1: Vec<RistrettoPoint> = Vec::new();
+    for j in compt..compt + l_2 {
+    	h1.push(CompressedRistretto(setup[j]).decompress().unwrap()); 
+    }
+    hh.push(h1);
+    
+    return Set{ gen: generator, g_: gg, f_: ff, h_: hh, l1: l_1, l2: l_2 };
+}
+
+
+// Write the commitment in a file:
+fn writecommit(c: &Commit) -> io::Result<()>{
+    let mut com: Vec<[u8; 32]> = Vec::new();
+    let mut file = File::options().write(true).truncate(true).create(true).open("commitment.txt")?;
+    match c{
+    	Commit{	pk, a1, a2, b0, b1 } =>{
+    	    com.push(((pk).compress()).to_bytes());
+    	    for i in 0..a1.len(){
+    	        com.push(((a1[i]).compress()).to_bytes());		    
+    	    }
+    	    for i in 0..a2.len(){
+    	        com.push(((a2[i]).compress()).to_bytes());		   
+    	    }
+    	    for i in 0..b0.len(){
+    	        com.push(((b0[i]).compress()).to_bytes());		   
+    	    }
+    	    for i in 0..b1.len(){
+    	        com.push(((b1[i]).compress()).to_bytes());		   
+    	    }
+        },
+    }
+    for i in 0..com.len(){
+        file.write_vectored(&[IoSlice::new(&com[i])])?;
+    }
+    return Ok(())
+}    
+ 
+// Read the commitment located in a file.
+fn exportcommit(l1: usize, l2: usize) -> Commit{
+    let mut buffer = Vec::new();
+    let file = File::open("commitment.txt"); 
+    let _= file.expect("REASON").read_to_end(&mut buffer); 
+    let mut com : Vec<[u8; 32]> = Vec::new();
+    let mut array = [0u8; 32];
+    for i in 0..buffer.len(){
+    	array[i % 32] = buffer[i];
+    	if i % 32 == 31 && i > 0{
+    		com.push(array.clone());
+    	}
+    }
+    // pk
+    let pubk = CompressedRistretto(com[0]).decompress().unwrap();
+    let mut a_1: Vec<RistrettoPoint> = Vec::new();
+    let mut a_2: Vec<RistrettoPoint> = Vec::new();
+    let mut b_0: Vec<RistrettoPoint> = Vec::new();
+    let mut b_1: Vec<RistrettoPoint> = Vec::new();
+    
+    // a1
+    let mut compt = 1; 
+    for i in compt..compt + l1{
+    	a_1.push(CompressedRistretto(com[i]).decompress().unwrap());
+    }
+    compt = compt + l1;
+    // a2
+    for i in compt..compt + l2{
+    	a_2.push(CompressedRistretto(com[i]).decompress().unwrap());
+    }
+    compt = compt + l2;
+    // b0
+    for i in compt..compt + l2{
+    	b_0.push(CompressedRistretto(com[i]).decompress().unwrap());
+    }
+    compt = compt + l2;
+    // b1
+    for i in compt..compt + l2{
+    	b_1.push(CompressedRistretto(com[i]).decompress().unwrap());
+    }
+    return Commit{pk: pubk, a1: a_1, a2: a_2, b0: b_0, b1: b_1};
+}
+
+// Write the proof of commitment in a file:
+fn writeproofcommit(p: &ZeroKnowledgeProofCommit, l1: usize, l2: usize) -> io::Result<()>{
+    let mut proof: Vec<[u8; 32]> = Vec::new();
+    let mut file = File::options().write(true).truncate(true).create(true).open("proofcommitment.txt")?;
+    
+    match p {
+    	ZeroKnowledgeProofCommit{ proofa1, proofa2, proofb } => {
+	    for i in 0..l1{
+    	    	match &proofa1[i] { 
+    	    	    ZeroKnowledgeProofA{ commitment0, commitments, challenges, responses } => {
+    	    	        for j in 0..2{
+    	    	            proof.push(((commitment0[j]).compress()).to_bytes());
+    	    	        }
+    	    	        for j in 0..2{
+    	    	            proof.push(((commitments[j]).compress()).to_bytes());
+    	    	        }
+    	    	        for j in 0..2{
+    	    	            proof.push((challenges[j]).to_bytes());
+    	    	        }
+    	    	        for j in 0..2{
+    	    	            proof.push((responses[j]).to_bytes());
+    	    	        }
+    	    	    }
+    	        }
+    	    }
+    	    for i in 0..l2{
+    	    	match &proofa2[i]{ 
+    	    	    ZeroKnowledgeProofA{ commitment0, commitments, challenges, responses } => {
+    	    	        for j in 0..2{
+    	    	            proof.push(((commitment0[j]).compress()).to_bytes());
+    	    	        }
+    	    	        for j in 0..2{
+    	    	            proof.push(((commitments[j]).compress()).to_bytes());
+    	    	        }
+    	    	        for j in 0..2{
+    	    	            proof.push((challenges[j]).to_bytes());
+    	    	        }
+    	    	        for j in 0..2{
+    	    	            proof.push((responses[j]).to_bytes());
+    	    	        }
+    	    	    }
+    	        }
+    	    }
+    	    for i in 0..l2{
+    	    	match &proofb[i]{ 
+    	    	    ZeroKnowledgeProofB{ commitment0, commitments1, challenge1, response1, commitments2, challenge2, response2 } => {
+    	    	      	for j in 0..2{
+    	    	            proof.push(((commitment0[j]).compress()).to_bytes());
+    	    	        }
+    	    	        for j in 0..2{
+    	    	            proof.push(((commitments1[j]).compress()).to_bytes());
+    	    	        }
+    	    	        proof.push((challenge1).to_bytes());
+    	    	        proof.push((response1).to_bytes());
+    	    	        for j in 0..2{
+    	    	            proof.push(((commitments2[j]).compress()).to_bytes());
+    	    	        }
+    	    	        proof.push((challenge2).to_bytes());
+    	    	        proof.push((response2).to_bytes());
+    	    	        
+    	    	    }
+    	    	}
+    	    }
+    	}
+    }	    
+    for k in 0..proof.len(){
+        file.write_vectored(&[IoSlice::new(&proof[k])])?;
+    }
+    return Ok(())
+}
+
+// Read the proof of commitment located in a file.
+fn exportproofcommit(l1: usize, l2: usize) -> ZeroKnowledgeProofCommit{
+    let mut buffer = Vec::new();
+    let file = File::open("proofcommitment.txt"); 
+    let _= file.expect("REASON").read_to_end(&mut buffer); 
+    let mut p : Vec<[u8; 32]> = Vec::new();
+    let mut array = [0u8; 32];
+    for i in 0..buffer.len(){
+    	array[i % 32] = buffer[i];
+    	if i % 32 == 31 && i > 0{
+    		p.push(array.clone());
+    	}
+    }
+    let mut compt = 0;
+    
+    // proofa1
+    let mut proof_a1: Vec<ZeroKnowledgeProofA> = Vec::new();
+    for _i in 0..l1{
+        let mut r0: Vec<RistrettoPoint> = Vec::new();
+    	let mut r: Vec<RistrettoPoint> = Vec::new();
+    	let mut c: Vec<Scalar> = Vec::new();
+    	let mut z: Vec<Scalar> = Vec::new();
+    	
+    	r0.push(CompressedRistretto(p[compt]).decompress().unwrap());
+        r0.push(CompressedRistretto(p[compt + 1]).decompress().unwrap());
+    	compt = compt + 2; 
+    	
+    	for j in compt..compt + 2{
+    	    r.push(CompressedRistretto(p[j]).decompress().unwrap());
+    	}
+    	compt = compt + 2;
+        for j in compt..compt + 2{
+    	    c.push(Scalar::from_bytes_mod_order(p[j]));
+    	}
+    	compt = compt + 2;
+        for j in compt..compt + 2{
+    	    z.push(Scalar::from_bytes_mod_order(p[j]));
+    	}
+    	compt = compt + 2;
+    	proof_a1.push(ZeroKnowledgeProofA{ commitment0: r0, commitments: r, challenges: c, responses: z});  	
+    }
+    
+    compt = 8 * l1;
+    // proofa2
+    let mut proof_a2: Vec<ZeroKnowledgeProofA> = Vec::new();
+    for _i in 0..l2{
+        let mut r0: Vec<RistrettoPoint> = Vec::new();
+    	let mut r: Vec<RistrettoPoint> = Vec::new();
+    	let mut c: Vec<Scalar> = Vec::new();
+    	let mut z: Vec<Scalar> = Vec::new();
+    	
+    	r0.push(CompressedRistretto(p[compt]).decompress().unwrap());
+    	r0.push(CompressedRistretto(p[compt+1]).decompress().unwrap());
+    	compt = compt + 2;
+    	for j in compt..compt + 2{
+    	    r.push(CompressedRistretto(p[j]).decompress().unwrap());
+    	}
+    	compt = compt + 2;
+        for j in compt..compt + 2{
+    	    c.push(Scalar::from_bytes_mod_order(p[j]));
+    	}
+    	compt = compt + 2;
+        for j in compt..compt + 2{
+    	    z.push(Scalar::from_bytes_mod_order(p[j]));
+    	}
+    	compt = compt + 2;
+    	proof_a2.push(ZeroKnowledgeProofA{ commitment0: r0, commitments: r, challenges: c, responses: z });  	
+    }
+    
+    compt = 8 * l1 + 8 * l2;
+    
+    // proofb
+    let mut proof_b: Vec<ZeroKnowledgeProofB> = Vec::new();
+    for _i in 0..l2{
+        let mut r0: Vec<RistrettoPoint> = Vec::new();
+    	let mut r1: Vec<RistrettoPoint> = Vec::new();
+    	let mut r2: Vec<RistrettoPoint> = Vec::new();
+    	
+    	r0.push(CompressedRistretto(p[compt]).decompress().unwrap());
+    	r0.push(CompressedRistretto(p[compt+1]).decompress().unwrap());
+    	compt = compt + 2;
+    	for j in compt..compt+2{
+    	    r1.push(CompressedRistretto(p[j]).decompress().unwrap());
+    	}
+    	compt = compt + 2;
+    	let c1 = Scalar::from_bytes_mod_order(p[compt]);
+    	let z1 = Scalar::from_bytes_mod_order(p[compt + 1]);
+    	compt = compt + 2;
+        for j in compt..compt+2{
+    	    r2.push(CompressedRistretto(p[j]).decompress().unwrap());
+    	}
+	compt = compt + 2;
+    	let c2 = Scalar::from_bytes_mod_order(p[compt]);
+    	let z2 = Scalar::from_bytes_mod_order(p[compt + 1]);
+    	compt = compt + 2;
+    	proof_b.push(ZeroKnowledgeProofB{ commitment0: r0, commitments1: r1, challenge1: c1, response1: z1, commitments2: r2, challenge2: c2, response2: z2 });  	
+    }
+    return ZeroKnowledgeProofCommit{ proofa1: proof_a1, proofa2: proof_a2, proofb: proof_b };  
+} 
+
+// Write the proof of opening in a file:
+fn writeproofopen(p: &ZeroKnowledgeProofOpen) -> io::Result<()>{
+    let mut proof: Vec<[u8; 32]> = Vec::new();
+    let mut file = File::options().write(true).truncate(true).create(true).open("proofopening.txt")?;
+    
+    match p {
+    	ZeroKnowledgeProofOpen{ commitments, response } => {
+	    for j in 0..commitments.len(){
+    	    	proof.push(((commitments[j]).compress()).to_bytes());
+    	    }
+    	    proof.push((response).to_bytes());
+    	}
+    }	    
+    for k in 0..proof.len(){
+        file.write_vectored(&[IoSlice::new(&proof[k])])?;
+    }
+    return Ok(())
+} 
+
+// Read the proof of opening located in a file.
+fn exportproofopen() -> ZeroKnowledgeProofOpen{
+    let mut buffer = Vec::new();
+    let file = File::open("proofopening.txt"); 
+    let _= file.expect("REASON").read_to_end(&mut buffer); 
+    let mut p : Vec<[u8; 32]> = Vec::new();
+    let mut array = [0u8; 32];
+    for i in 0..buffer.len(){
+    	array[i % 32] = buffer[i];
+    	if i % 32 == 31 && i > 0{
+    		p.push(array.clone());
+    	}
+    }
+    let mut r : Vec<RistrettoPoint> =  Vec::new();
+    for j in 0..2 {
+    	r.push(CompressedRistretto(p[j]).decompress().unwrap());
+    }
+    let z = Scalar::from_bytes_mod_order(p[2]);
+    
+    return ZeroKnowledgeProofOpen{ commitments: r, response: z };
+}
+
+// Write the proof of opening with LDP in a file:
+fn writeproofopenldp(p: &ZeroKnowledgeProofOpenLDP) -> io::Result<()>{
+    let mut proof: Vec<[u8; 32]> = Vec::new();
+    let mut file = File::options().write(true).truncate(true).create(true).open("proofopeningldp.txt")?;
+    
+    match p {
+    	ZeroKnowledgeProofOpenLDP{ commitments0, challenge0, response0, commitments1, challenge1, responses1 } => {
+	    for j in 0..commitments0.len(){
+    	    	proof.push(((commitments0[j]).compress()).to_bytes());
+    	    }
+    	    proof.push((challenge0).to_bytes());
+    	    proof.push((response0).to_bytes());
+    	    for j in 0..commitments1.len(){
+    	    	proof.push(((commitments1[j]).compress()).to_bytes());
+    	    }
+    	    proof.push((challenge1).to_bytes());
+    	    for j in 0..responses1.len(){
+    	    	proof.push((responses1[j]).to_bytes());
+    	    }
+    	}
+    }	    
+    for k in 0..proof.len(){
+        file.write_vectored(&[IoSlice::new(&proof[k])])?;
+    }
+    return Ok(())
+} 
+
+// Read the proof of opening located in a file.
+fn exportproofopenldp() -> ZeroKnowledgeProofOpenLDP{
+    let mut buffer = Vec::new();
+    let file = File::open("proofopeningldp.txt"); 
+    let _= file.expect("REASON").read_to_end(&mut buffer); 
+    let mut p : Vec<[u8; 32]> = Vec::new();
+    let mut array = [0u8; 32];
+    for i in 0..buffer.len(){
+    	array[i % 32] = buffer[i];
+    	if i % 32 == 31 && i > 0{
+    		p.push(array.clone());
+    	}
+    }
+    
+    let mut r0 : Vec<RistrettoPoint> =  Vec::new();
+    let mut r1 : Vec<RistrettoPoint> =  Vec::new();
+    let mut z1 : Vec<Scalar> =  Vec::new();
+    for j in 0..3 {
+    	r0.push(CompressedRistretto(p[j]).decompress().unwrap());
+    }
+    let c0 = Scalar::from_bytes_mod_order(p[3]);
+    let z0 = Scalar::from_bytes_mod_order(p[4]);
+    for j in 5..11 {
+    	r1.push(CompressedRistretto(p[j]).decompress().unwrap());
+    }
+    let c1 = Scalar::from_bytes_mod_order(p[11]);
+    for j in 12..14 {
+    	z1.push(Scalar::from_bytes_mod_order(p[j]));
+    }
+    
+    return ZeroKnowledgeProofOpenLDP{ commitments0: r0, challenge0: c0, response0: z0, commitments1: r1, challenge1: c1, responses1: z1 };
+}
+
 // Functions for measuring the elapsed time between each algorithm:
-pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
+pub fn measure_time(iter: u32, l_1: usize, l_2: usize) {
 
     let mut time_setup = Duration::ZERO;
     let mut time_commit = Duration::ZERO;
@@ -1066,6 +1557,12 @@ pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
     let mut time_gen = Duration::ZERO;
     let mut time_sig = Duration::ZERO;
     let mut time_ver_sig = Duration::ZERO;
+    
+    let mut setsize = 0;   
+    let mut comsize = 0;
+    let mut pcomsize = 0;
+    let mut popensize = 0;
+    let mut popenldpsize = 0;
 
     for _i in 0..iter {
 	
@@ -1073,9 +1570,15 @@ pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
     
     	// Setup:
     	let start_setup = Instant::now();
-   	let set = setup(&mut csrng, l_1, l_2);  
+   	let set = setup(&mut csrng, l_1, l_2); 
    	let duration_setup = start_setup.elapsed();
    	time_setup += duration_setup;
+   	let _ = writesetup(&set);
+        let newset = exportsetup();
+        
+        assert!(newset == set, "The setup in the file in not equal to the real setup");
+    	let setdata = fs::metadata("setup.txt");
+    	setsize += setdata.expect("REASON").len(); 	
    		
     	let theta = vec![rand_bitstring(l_1), rand_bitstring(l_2)];
     	let m = rand_bitstring(l_2);
@@ -1085,11 +1588,24 @@ pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
     	let comm = commit(&mut csrng, set.clone(), (&m).to_vec(), theta.clone());
     	let duration_commit = start_commit.elapsed();
    	time_commit += duration_commit;
-    	
+   	
     	let k = comm.0;
     	let c = comm.1;
     	let p_comm = comm.2;
     	
+    	let _ = writecommit(&c);
+        let newc = exportcommit(l_1, l_2);
+        assert!(newc == c, "The commitment in the file in not equal to the real commitment");
+    	let comdata = fs::metadata("commitment.txt");
+    	comsize += comdata.expect("REASON").len();
+    	
+    	let _ = writeproofcommit(&p_comm, l_1, l_2);
+        let new_pcomm = exportproofcommit(l_1, l_2);
+        assert!(new_pcomm == p_comm, "The proof of commitment in the file in not equal to the real proof of commitment");
+    	let pcomdata = fs::metadata("proofcommitment.txt");
+    	pcomsize += pcomdata.expect("REASON").len();
+    	
+    	// Ver_Commit:
     	let start_ver_commit = Instant::now();
     	let b_comm = ver_commit(set.clone(), c.clone(), p_comm);
     	let duration_ver_commit = start_ver_commit.elapsed();
@@ -1105,6 +1621,12 @@ pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
   
     	let m_open = opening.0;
     	let p_open = opening.1;
+    	
+    	let _ = writeproofopen(&p_open);
+        let new_popen = exportproofopen();
+        assert!(new_popen == p_open, "The proof of opening in the file in not equal to the real proof of opening");
+    	let popendata = fs::metadata("proofopening.txt");
+    	popensize += popendata.expect("REASON").len();
     	
     	// Ver_Open:
     	let start_ver_open = Instant::now();
@@ -1127,6 +1649,12 @@ pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
     	let vec_h = openingldp.1;
     	let vec_y_p = openingldp.2;
     	let p_openldp = openingldp.3;
+    	
+    	let _ = writeproofopenldp(&p_openldp);
+        let new_popenldp = exportproofopenldp();
+        assert!(new_popenldp == p_openldp, "The proof of opening with ldp in the file in not equal to the real proof of opening with ldp");
+    	let popenldpdata = fs::metadata("proofopeningldp.txt");
+    	popenldpsize += popenldpdata.expect("REASON").len();
     	
     	// Ver_Openldp:
     	let start_ver_openldp = Instant::now();
@@ -1170,6 +1698,12 @@ pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
     let average_time_sig = time_sig/iter.try_into().unwrap();
     let average_time_ver_sig = time_ver_sig/iter.try_into().unwrap();
     
+    let averagesetsize = setsize/u64::from(iter);
+    let averagecomsize = comsize/u64::from(iter);
+    let averagepcomsize = pcomsize/u64::from(iter);
+    let averagepopensize = popensize/u64::from(iter);
+    let averagepopenldpsize = popenldpsize/u64::from(iter);
+    
     println!("Average running time over {:?} iterations with l1 = {:?} and l2 = {:?}:", iter, l_1, l_2);
     println!("LDP Commitment scheme:");
     print!("Setup: {:?} \n", average_time_setup);
@@ -1179,6 +1713,12 @@ pub fn measure_time(iter: usize, l_1: usize, l_2: usize) {
     print!("Ver_Open: {:?} \n", average_time_ver_open);
     print!("OpenLDP: {:?} \n", average_time_openldp);
     print!("Ver_OpenLDP: {:?} \n", average_time_ver_openldp);
+    
+    print!("Size of setup: {:?} bytes \n", averagesetsize);
+    print!("Size of commitment: {:?} bytes \n", averagecomsize);
+    print!("Size of proof of commitment: {:?} bytes \n", averagepcomsize);
+    print!("Size of proof of opening: {:?} bytes \n", averagepopensize);
+    print!("Size of proof of opening with ldp: {:?} bytes \n", averagepopenldpsize);
     
     println!("Schnorr signature of commitment:");
     print!("Gen: {:?} \n", average_time_gen);
