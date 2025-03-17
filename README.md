@@ -1,5 +1,5 @@
 # Cryptographic Commitments on Anonymizable Data
-This repository provides a Rust implementation of our LDP-C (LDP Commitment) scheme named ORRC (Optimized Randomized Response Commitment)
+This repository provides the full version of our paper and the Rust implementation of our LDP-C (LDP Commitment) scheme named ORRC (Optimized Randomized Response Commitment)
 which is a tuple of seven algorithm: $\mathsf{Setup}$, $\mathsf{Commit}$, $\mathsf{VerCommit}$, $\mathsf{Open}$, $\mathsf{VerOpen}$, $\mathsf{OpenLDP}$ and $\mathsf{VerOpenLDP}$. Furthermore, we implemented a signature including the algorithms $\mathsf{Gen}$, $\mathsf{Sign}$ and $\mathsf{Ver}$.
 
 ## How to use the implementation
